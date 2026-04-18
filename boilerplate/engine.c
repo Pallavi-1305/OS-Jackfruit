@@ -419,6 +419,116 @@ static int run_supervisor(const char *rootfs)
      *   4) spawn the logger thread
      *   5) enter the supervisor event loop
      */
+ctx.server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+if (ctx.server_fd < 0) {
+    perror("socket");
+    return 1;
+}
+
+unlink(CONTROL_PATH);
+
+struct sockaddr_un addr;
+memset(&addr, 0, sizeof(addr));
+addr.sun_family = AF_UNIX;
+strncpy(addr.sun_path, CONTROL_PATH, sizeof(addr.sun_path)-1);
+
+if (bind(ctx.server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    perror("bind");
+    return 1;
+}
+
+if (listen(ctx.server_fd, 5) < 0) {
+    perror("listen");
+    return 1;
+}
+
+printf("Supervisor running...\n");
+
+while (1) {
+    int client_fd;
+    control_request_t req;
+    control_response_t resp;
+
+    client_fd = accept(ctx.server_fd, NULL, NULL);
+    if (client_fd < 0)
+        continue;
+
+    read(client_fd, &req, sizeof(req));
+
+    resp.status = 0;
+
+if (req.kind == CMD_START) {
+    container_record_t *node = malloc(sizeof(container_record_t));
+    memset(node, 0, sizeof(container_record_t));
+
+    strncpy(node->id, req.container_id, CONTAINER_ID_LEN - 1);
+    node->state = CONTAINER_RUNNING;
+    node->started_at = time(NULL);
+    node->soft_limit_bytes = req.soft_limit_bytes;
+    node->hard_limit_bytes = req.hard_limit_bytes;
+    node->host_pid = getpid();
+
+    pthread_mutex_lock(&ctx.metadata_lock);
+    node->next = ctx.containers;
+    ctx.containers = node;
+    pthread_mutex_unlock(&ctx.metadata_lock);
+
+    snprintf(resp.message, sizeof(resp.message),
+             "Container %s started", req.container_id);
+}
+else if (req.kind == CMD_PS) {
+    char temp[CONTROL_MESSAGE_LEN] = "";
+    pthread_mutex_lock(&ctx.metadata_lock);
+
+    container_record_t *cur = ctx.containers;
+    while (cur) {
+        strcat(temp, cur->id);
+        strcat(temp, " ");
+        strcat(temp, state_to_string(cur->state));
+        strcat(temp, "\n");
+        cur = cur->next;
+    }
+
+    pthread_mutex_unlock(&ctx.metadata_lock);
+
+    if (strlen(temp) == 0)
+        strcpy(temp, "No containers");
+
+    strncpy(resp.message, temp, sizeof(resp.message)-1);
+}
+else if (req.kind == CMD_STOP) {
+    int found = 0;
+
+    pthread_mutex_lock(&ctx.metadata_lock);
+
+    container_record_t *cur = ctx.containers;
+    while (cur) {
+        if (strcmp(cur->id, req.container_id) == 0) {
+            cur->state = CONTAINER_STOPPED;
+            found = 1;
+            break;
+        }
+        cur = cur->next;
+    }
+
+    pthread_mutex_unlock(&ctx.metadata_lock);
+
+    if (found)
+        snprintf(resp.message, sizeof(resp.message),
+                 "Container %s stopped", req.container_id);
+    else
+        snprintf(resp.message, sizeof(resp.message),
+                 "Container not found");
+}
+else {
+    snprintf(resp.message, sizeof(resp.message),
+             "Received command: %d for %s",
+             req.kind, req.container_id);
+}
+
+    write(client_fd, &resp, sizeof(resp));
+    close(client_fd);
+}
     fprintf(stderr, "Supervisor mode not implemented yet for base-rootfs: %s\n", rootfs);
 
     bounded_buffer_begin_shutdown(&ctx.log_buffer);
@@ -437,9 +547,33 @@ static int run_supervisor(const char *rootfs)
  */
 static int send_control_request(const control_request_t *req)
 {
-    (void)req;
-    fprintf(stderr, "Control-plane client path not implemented.\n");
-    return 1;
+    int fd;
+    struct sockaddr_un addr;
+    control_response_t resp;
+
+    fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        perror("socket");
+        return 1;
+    }
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, CONTROL_PATH, sizeof(addr.sun_path) - 1);
+
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("connect");
+        close(fd);
+        return 1;
+    }
+
+    write(fd, req, sizeof(*req));
+    read(fd, &resp, sizeof(resp));
+
+    printf("%s\n", resp.message);
+
+    close(fd);
+    return resp.status;
 }
 
 static int cmd_start(int argc, char *argv[])
