@@ -458,23 +458,50 @@ while (1) {
     resp.status = 0;
 
 if (req.kind == CMD_START) {
-    container_record_t *node = malloc(sizeof(container_record_t));
-    memset(node, 0, sizeof(container_record_t));
+    pid_t pid = fork();
 
-    strncpy(node->id, req.container_id, CONTAINER_ID_LEN - 1);
-    node->state = CONTAINER_RUNNING;
-    node->started_at = time(NULL);
-    node->soft_limit_bytes = req.soft_limit_bytes;
-    node->hard_limit_bytes = req.hard_limit_bytes;
-    node->host_pid = getpid();
+    if (pid == 0) {
+    char logfile[256];
+    int fd;
 
-    pthread_mutex_lock(&ctx.metadata_lock);
-    node->next = ctx.containers;
-    ctx.containers = node;
-    pthread_mutex_unlock(&ctx.metadata_lock);
+    snprintf(logfile, sizeof(logfile), "logs/%s.log", req.container_id);
 
-    snprintf(resp.message, sizeof(resp.message),
-             "Container %s started", req.container_id);
+    fd = open(logfile, O_CREAT | O_WRONLY | O_APPEND, 0644);
+    if (fd >= 0) {
+        dup2(fd, STDOUT_FILENO);
+        dup2(fd, STDERR_FILENO);
+        close(fd);
+    }
+
+    execl(req.command, req.command, NULL);
+    perror("execl");
+    exit(1);
+}
+    else if (pid > 0) {
+        container_record_t *node = malloc(sizeof(container_record_t));
+        memset(node, 0, sizeof(container_record_t));
+
+        strncpy(node->id, req.container_id, CONTAINER_ID_LEN - 1);
+        node->state = CONTAINER_RUNNING;
+        node->started_at = time(NULL);
+        node->soft_limit_bytes = req.soft_limit_bytes;
+        node->hard_limit_bytes = req.hard_limit_bytes;
+        node->host_pid = pid;
+
+        pthread_mutex_lock(&ctx.metadata_lock);
+        node->next = ctx.containers;
+        ctx.containers = node;
+        pthread_mutex_unlock(&ctx.metadata_lock);
+
+        snprintf(resp.message, sizeof(resp.message),
+                 "Container %s started with PID %d",
+                 req.container_id, pid);
+    }
+    else {
+        resp.status = 1;
+        snprintf(resp.message, sizeof(resp.message),
+                 "Fork failed");
+    }
 }
 else if (req.kind == CMD_PS) {
     char temp[CONTROL_MESSAGE_LEN] = "";
@@ -504,7 +531,8 @@ else if (req.kind == CMD_STOP) {
     container_record_t *cur = ctx.containers;
     while (cur) {
         if (strcmp(cur->id, req.container_id) == 0) {
-            cur->state = CONTAINER_STOPPED;
+            kill(cur->host_pid, SIGKILL);
+    	    cur->state = CONTAINER_STOPPED;
             found = 1;
             break;
         }
@@ -519,6 +547,31 @@ else if (req.kind == CMD_STOP) {
     else
         snprintf(resp.message, sizeof(resp.message),
                  "Container not found");
+}
+else if (req.kind == CMD_LOGS) {
+    char path[256];
+    FILE *fp;
+    char line[200];
+
+    snprintf(path, sizeof(path), "logs/%s.log", req.container_id);
+    fp = fopen(path, "r");
+
+    if (!fp) {
+        snprintf(resp.message, sizeof(resp.message),
+                 "Log file not found");
+    } else {
+        resp.message[0] = '\0';
+
+        while (fgets(line, sizeof(line), fp)) {
+            strncat(resp.message, line,
+                    sizeof(resp.message) - strlen(resp.message) - 1);
+        }
+
+        fclose(fp);
+
+        if (strlen(resp.message) == 0)
+            strcpy(resp.message, "(empty log)");
+    }
 }
 else {
     snprintf(resp.message, sizeof(resp.message),
