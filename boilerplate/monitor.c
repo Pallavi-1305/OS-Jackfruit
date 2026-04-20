@@ -31,27 +31,17 @@
 #define DEVICE_NAME "container_monitor"
 #define CHECK_INTERVAL_SEC 1
 
-/* ==============================================================
- * TODO 1: Define your linked-list node struct.
- *
- * Requirements:
- *   - track PID, container ID, soft limit, and hard limit
- *   - remember whether the soft-limit warning was already emitted
- *   - include `struct list_head` linkage
- * ============================================================== */
+struct monitored_proc {
+    pid_t pid;
+    char container_id[32];
+    unsigned long soft_limit_bytes;
+    unsigned long hard_limit_bytes;
+    int soft_warned;
+    struct list_head list;
+};
 
-
-/* ==============================================================
- * TODO 2: Declare the global monitored list and a lock.
- *
- * Requirements:
- *   - shared across ioctl and timer code paths
- *   - protect insert, remove, and iteration safely
- *
- * You may choose either a mutex or a spinlock, but your README must
- * justify the choice in terms of the code paths you implemented.
- * ============================================================== */
-
+static LIST_HEAD(monitored_list);
+static DEFINE_MUTEX(monitored_lock);
 
 /* --- Provided: internal device / timer state --- */
 static struct timer_list monitor_timer;
