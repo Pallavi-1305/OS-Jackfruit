@@ -36,7 +36,7 @@
 #include <unistd.h>
 
 #include "monitor_ioctl.h"
-
+static volatile sig_atomic_t keep_running = 1;
 #define STACK_SIZE (1024 * 1024)
 #define CONTAINER_ID_LEN 32
 #define CONTROL_PATH "/tmp/mini_runtime.sock"
@@ -444,6 +444,11 @@ int unregister_from_monitor(int monitor_fd, const char *container_id, pid_t host
  *   - accept control requests and update container state
  *   - reap children and respond to signals
  */
+static void handle_signal(int sig)
+{
+    (void)sig;
+    keep_running = 0;
+}
 static int run_supervisor(const char *rootfs)
 {
     (void)rootfs;
@@ -499,16 +504,44 @@ if (listen(ctx.server_fd, 5) < 0) {
     return 1;
 }
 
+struct sigaction sa;
+memset(&sa, 0, sizeof(sa));
+sa.sa_handler = handle_signal;
+sigemptyset(&sa.sa_mask);
+sa.sa_flags = 0;
+
+sigaction(SIGINT, &sa, NULL);
+sigaction(SIGTERM, &sa, NULL);
 printf("Supervisor running...\n");
 
-while (1) {
+while (keep_running) {
     int client_fd;
     control_request_t req;
     control_response_t resp;
     ssize_t n;
+    pid_t dead;
+int status;
+
+while ((dead = waitpid(-1, &status, WNOHANG)) > 0) {
+    pthread_mutex_lock(&ctx.metadata_lock);
+
+    container_record_t *cur = ctx.containers;
+    while (cur) {
+        if (cur->host_pid == dead) {
+            cur->state = CONTAINER_EXITED;
+            break;
+        }
+        cur = cur->next;
+    }
+
+    pthread_mutex_unlock(&ctx.metadata_lock);
+}
     client_fd = accept(ctx.server_fd, NULL, NULL);
-    if (client_fd < 0)
-        continue;
+if (client_fd < 0) {
+    if (!keep_running)
+        break;
+    continue;
+}
 
     n = read(client_fd, &req, sizeof(req));
     (void)n;
@@ -644,6 +677,7 @@ else {
     bounded_buffer_begin_shutdown(&ctx.log_buffer);
 bounded_buffer_destroy(&ctx.log_buffer);
 pthread_mutex_destroy(&ctx.metadata_lock);
+unlink(CONTROL_PATH);
 return 0;
 }
 
